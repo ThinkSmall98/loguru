@@ -105,6 +105,17 @@ class Rotation:
         file.seek(0, 2)
         return file.tell() + len(message) > size_limit
 
+    @staticmethod
+    def rotation_level(message, file, level_no):
+        return message.record["level"].no >= level_no
+
+    class PostWriteRotation:
+        def __init__(self, rotation_function):
+            self._rotation_function = rotation_function
+
+        def __call__(self, message, file):
+            return self._rotation_function(message, file)
+
     class RotationTime:
         def __init__(self, step_forward, time_init=None):
             self._step_forward = step_forward
@@ -174,6 +185,7 @@ class FileSink:
         mode="a",
         buffering=1,
         encoding="utf8",
+        rotation_level=None,
         **kwargs
     ):
         self.encoding = encoding
@@ -182,7 +194,7 @@ class FileSink:
         self._path = str(path)
 
         self._glob_patterns = self._make_glob_patterns(self._path)
-        self._rotation_function = self._make_rotation_function(rotation)
+        self._rotation_function = self._make_rotation_function(rotation, rotation_level)
         self._retention_function = self._make_retention_function(retention)
         self._compression_function = self._make_compression_function(compression)
 
@@ -207,10 +219,35 @@ class FileSink:
         if self._watch:
             self._reopen_if_needed()
 
-        if self._rotation_function is not None and self._rotation_function(message, self._file):
+        pre_write_rotation = False
+        post_write_rotation = False
+
+        if self._rotation_function is not None:
+            if isinstance(self._rotation_function, Rotation.RotationGroup):
+                for rotation in self._rotation_function._rotations:
+                    if isinstance(rotation, Rotation.PostWriteRotation):
+                        if rotation(message, self._file):
+                            post_write_rotation = True
+                    else:
+                        if rotation(message, self._file):
+                            pre_write_rotation = True
+            elif isinstance(self._rotation_function, Rotation.PostWriteRotation):
+                if self._rotation_function(message, self._file):
+                    post_write_rotation = True
+            else:
+                if self._rotation_function(message, self._file):
+                    pre_write_rotation = True
+
+        should_rotate = pre_write_rotation or post_write_rotation
+
+        if pre_write_rotation and not post_write_rotation:
             self._terminate_file(is_rotating=True)
 
         self._file.write(message)
+        self._file.flush()
+
+        if post_write_rotation:
+            self._terminate_file(is_rotating=True)
 
     def stop(self):
         if self._watch:
@@ -314,22 +351,26 @@ class FileSink:
         return [escaped, escaped + ".*", root + ".*" + ext, root + ".*" + ext + ".*"]
 
     @staticmethod
-    def _make_rotation_function(rotation):
+    def _make_rotation_function(rotation, rotation_level=None):
         if rotation is None:
             return None
         if isinstance(rotation, (list, tuple, set)):
             if len(rotation) == 0:
                 raise ValueError("Must provide at least one rotation condition")
             return Rotation.RotationGroup(
-                [FileSink._make_rotation_function(rot) for rot in rotation]
+                [FileSink._make_rotation_function(rot, rotation_level) for rot in rotation]
             )
         if isinstance(rotation, str):
+            if rotation == "level":
+                level_no = FileSink._parse_rotation_level(rotation_level)
+                rotation_func = partial(Rotation.rotation_level, level_no=level_no)
+                return Rotation.PostWriteRotation(rotation_func)
             size = string_parsers.parse_size(rotation)
             if size is not None:
-                return FileSink._make_rotation_function(size)
+                return FileSink._make_rotation_function(size, rotation_level)
             interval = string_parsers.parse_duration(rotation)
             if interval is not None:
-                return FileSink._make_rotation_function(interval)
+                return FileSink._make_rotation_function(interval, rotation_level)
             frequency = string_parsers.parse_frequency(rotation)
             if frequency is not None:
                 return Rotation.RotationTime(frequency)
@@ -337,7 +378,7 @@ class FileSink:
             if daytime is not None:
                 day, time = daytime
                 if day is None:
-                    return FileSink._make_rotation_function(time)
+                    return FileSink._make_rotation_function(time, rotation_level)
                 if time is None:
                     time = datetime.time(0, 0, 0)
                 step_forward = partial(Rotation.forward_weekday, weekday=day)
@@ -353,6 +394,28 @@ class FileSink:
         if callable(rotation):
             return rotation
         raise TypeError("Cannot infer rotation for objects of type: '%s'" % type(rotation).__name__)
+
+    @staticmethod
+    def _parse_rotation_level(rotation_level):
+        if rotation_level is None:
+            return 40
+        if isinstance(rotation_level, int):
+            return rotation_level
+        if isinstance(rotation_level, str):
+            level_map = {
+                "TRACE": 5,
+                "DEBUG": 10,
+                "INFO": 20,
+                "SUCCESS": 25,
+                "WARNING": 30,
+                "ERROR": 40,
+                "CRITICAL": 50
+            }
+            level_upper = rotation_level.upper()
+            if level_upper in level_map:
+                return level_map[level_upper]
+            raise ValueError("Cannot parse rotation_level from: '%s'" % rotation_level)
+        raise TypeError("Cannot infer rotation_level for objects of type: '%s'" % type(rotation_level).__name__)
 
     @staticmethod
     def _make_retention_function(retention):

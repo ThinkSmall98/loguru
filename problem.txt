@@ -1,0 +1,54 @@
+Context:
+The current loguru rotation logic is "pre-emptive" (checks before writing). You are tasked with implementing a reactive rotation trigger that responds to the content of the message itself.
+
+1. Core Requirements & API Specification:
+
+API Update: logger.add() must support rotation="level".
+
+Configurable Threshold: A new parameter, rotation_level, must be supported.
+
+It must accept integer values (e.g., 40) or string names (e.g., "ERROR").
+
+Default: If rotation="level" is active but rotation_level is omitted, it must default to 40.
+
+Post-Write Execution: The rotation must occur after the record triggering the rotation has been fully written and flushed to disk. The triggering record must be the final entry in the rotated file.
+
+2. Combining Triggers (Guideline 4 Fix):
+
+The "Or" Logic: When combining triggers, the user will pass a list to the rotation argument.
+
+Example: logger.add("file.log", rotation=["10 MB", "level"], rotation_level="ERROR")
+
+Requirement: The file must rotate if either the file size exceeds 10 MB (pre-write) OR a log record meets the level threshold (post-write).
+
+Deduplication: If a single record triggers both a size-based rotation and a level-based rotation, the system must perform exactly one rotation. The resulting file must contain that triggering record.
+
+3. Deterministic Thread-Safety (Guideline 3 Fix):
+
+Requirement: The rotation must be atomic relative to the sink's write-lock.
+
+Expected Behavior: Once a record triggers a rotation, the sink's internal state must ensure that no subsequent records (from any thread) can be written to the "old" file.
+
+Testable Verification: You can verify this by ensuring that the rotate() call occurs within the same locked context as the write() and flush() operations.
+
+Why this fixes the issues:
+For Guideline 4 (Self-contained):
+By explicitly defining the list syntax rotation=["10 MB", "level"], we remove the agent's need to "invent" a new way to combine triggers. This matches Pythonic conventions used in similar libraries (like marshmallow or click).
+
+For Guideline 3 (Testability):
+Instead of asking the agent to "ensure no race conditions" (which is hard to prove), we ask for atomicity within the sink's lock.
+
+The Test: We can now test this by looking at the code structure. If the rotate() call is outside the with self._lock: block, it’s wrong.
+
+The Logic: If the lock is held from the moment the ERROR is written until the rotation is finished, it is physically impossible for another thread to "sneak" a message into the wrong file.
+
+Final Acceptance Checklist for the Agent:
+Does logger.add(..., rotation="level") work without crashing?
+
+Does rotation_level="INFO" correctly override the default "ERROR"?
+
+In a list of triggers ["10 MB", "level"], does the file rotate if either is true?
+
+Is the triggering record always the last line in the rotated file?
+
+Is the rotation logic contained within the sink's thread-lock?

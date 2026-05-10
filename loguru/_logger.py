@@ -337,7 +337,11 @@ class Logger:
             types, optional
             Condition(s) indicating whenever the current logged file should be closed and a
             new one started. If a list of conditions are provided, the current file is rotated
-            if any condition is true.
+            if any condition is true. Use ``"level"`` to enable level-based rotation.
+        rotation_level : |int| or |str|, optional
+            The minimum severity level that triggers rotation when ``rotation="level"`` is set.
+            Can be an integer (e.g., ``40``) or a level name (e.g., ``"ERROR"``). 
+            Defaults to ``40`` (ERROR level) if not specified.
         retention : |str|, |int|, |timedelta| or |callable|_, optional
             A directive filtering old files that should be removed during rotation or end of
             program.
